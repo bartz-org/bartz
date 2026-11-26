@@ -535,6 +535,45 @@ def test_sample_sigma2_leaf_false(continuous_data: _Data, keys: split) -> None:
     assert_array_equal(prec, jnp.full(prec.shape, prec[0]))
 
 
+def test_sample_sigma2_global_false(continuous_data: _Data, keys: split) -> None:
+    """With `sample_sigma2_global=False` the error variance stays at `sigma2_init`."""
+    # scale y to check the predictive draws use the original outcome scale
+    y = 100 * continuous_data.y_train
+
+    gp: dict = {'sample_sigma2_global': False, 'sigma2_init': 0.25}
+    m = bst.BARTModel()
+    with pytest.warns(UserWarning, match='`error_cov_inv` has no prior'):
+        m.sample(
+            X_train=continuous_data.X_train,
+            y_train=y,
+            general_params=dict(gp, random_seed=keys.pop()),
+            **_SAMPLE_KW,
+        )
+
+    assert not m.sample_sigma2_global
+    assert m.global_var_samples is None
+
+    with pytest.raises(ValueError, match='does not have global variance'):
+        m.extract_parameter('sigma2')
+
+    sdev = m._bart.get_error_sdev()
+    assert_close_matrices(sdev, jnp.full(sdev.shape, 0.5), rtol=1e-6)
+
+    draws = m.sample_posterior_predictive(continuous_data.X_train)
+    residuals = np.asarray(draws) - np.asarray(m.y_hat_train)[:, :, None]
+    assert_allclose(residuals.std(), 0.5 * m.y_std, rtol=0.05)
+
+    st_model = stochtree.BARTModel()
+    st_model.sample(
+        # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32 input
+        X_train=np.asarray(continuous_data.X_train, np.float64),
+        y_train=np.asarray(y, np.float64),
+        general_params=gp,
+        **_SAMPLE_KW,
+    )
+    assert str(m) == str(st_model)
+
+
 def _sample_with_prior(
     data: _Data, shape: float, scale: float, keys: split
 ) -> bst.BARTModel:
@@ -583,7 +622,7 @@ def test_unknown_dict_keys_rejected(continuous_data: _Data, keys: split) -> None
             **_SAMPLE_KW,
         )
     m = bst.BARTModel()
-    sample_kw: kwdict = dict(_SAMPLE_KW, mean_forest_params={'keep_vars': []})
+    sample_kw: kwdict = dict(_SAMPLE_KW, mean_forest_params={'bogus': 1})
     with pytest.raises(ValueError, match='mean_forest_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
@@ -632,28 +671,114 @@ def test_observation_weights_raises(continuous_data: _Data) -> None:
 
 
 def test_variable_weights_validation(continuous_data: _Data, keys: split) -> None:
-    """`variable_weights` must be strictly positive."""
+    """`variable_weights` must be non-negative, and not all zero."""
     data = continuous_data
     p = data.X_train.shape[1]
+    for weights in (np.full(p, -1.0), np.full(p, np.nan), np.zeros(p)):
+        m = bst.BARTModel()
+        with pytest.raises(EQX_RUNTIME_ERRORS, match='with at least one > 0'):
+            m.sample(
+                X_train=data.X_train,
+                y_train=data.y_train,
+                general_params={'variable_weights': weights, 'random_seed': keys.pop()},
+                **_SAMPLE_KW,
+            )
+
+
+def _sample_blocked(
+    data: _Data,
+    key: Key[Array, ''],
+    *,
+    general_params: Mapping[str, Any] = MappingProxyType({}),
+    mean_forest_params: Mapping[str, Any] = MappingProxyType({}),
+    bart_kwargs: Mapping[str, Any] = MappingProxyType({}),
+) -> bst.BARTModel:
     m = bst.BARTModel()
-    with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
-        m.sample(
-            X_train=data.X_train,
-            y_train=data.y_train,
-            general_params={'variable_weights': np.zeros(p), 'random_seed': keys.pop()},
-            **_SAMPLE_KW,
-        )
-    m2 = bst.BARTModel()
-    m2.sample(
+    m.sample(
         X_train=data.X_train,
         y_train=data.y_train,
-        general_params={
-            'variable_weights': np.full(p, 1e-3),
-            'random_seed': keys.pop(),
-        },
+        general_params=dict(general_params, random_seed=key),
+        mean_forest_params=mean_forest_params,
+        bart_kwargs=bart_kwargs,
         **_SAMPLE_KW,
     )
-    assert m2.is_sampled()
+    return m
+
+
+@pytest.mark.parametrize(
+    ('params', 'blocked'),
+    [
+        ({'variable_weights': np.array([1.0, 0.0, 2.0, 0.0])}, (1, 3)),
+        ({'keep_vars': [0, 2]}, (1, 3)),
+        ({'keep_vars': np.array([0, 2])}, (1, 3)),
+        ({'keep_vars': [0, 2, 0]}, (1, 3)),
+        ({'drop_vars': [1]}, (1,)),
+        ({'drop_vars': np.array([1])}, (1,)),
+        ({'keep_vars': jnp.array([0, 2])}, (1, 3)),
+        (
+            {'drop_vars': [1], 'variable_weights': np.array([1.0, 1.0, 0.0, 1.0])},
+            (1, 2),
+        ),
+        ({'keep_vars': [0, 2], 'drop_vars': [0]}, (1, 3)),
+        ({'drop_vars': [1], 'rm_const': False}, (1,)),
+        ({'keep_vars': jnp.array([0, 2]), 'rm_const': False}, (1, 3)),
+        (
+            {'variable_weights': np.array([1.0, 0.0, 2.0, 0.0]), 'rm_const': False},
+            (1, 3),
+        ),
+    ],
+)
+def test_blocked_covariates(
+    continuous_data: _Data, keys: split, params: dict, blocked: tuple[int, ...]
+) -> None:
+    """Covariates with zero weight, or excluded by keep/drop_vars, are never split on."""
+    gp = {k: v for k, v in params.items() if k == 'variable_weights'}
+    mfp = {k: v for k, v in params.items() if k in ('keep_vars', 'drop_vars')}
+    bkw = {k: v for k, v in params.items() if k == 'rm_const'}
+    m = _sample_blocked(
+        continuous_data,
+        keys.pop(),
+        general_params=gp,
+        mean_forest_params=mfp,
+        bart_kwargs=bkw,
+    )
+    varcount = np.asarray(m._bart.varcount.sum(axis=0))
+    is_blocked = np.isin(np.arange(varcount.size), blocked)
+    assert_array_equal(varcount[is_blocked], np.zeros(len(blocked), varcount.dtype))
+    assert np.all(varcount[~is_blocked] > 0)
+
+
+@pytest.mark.parametrize(
+    ('mfp', 'match'),
+    [
+        ({'keep_vars': ['a']}, 'names only if X_train is a dataframe'),
+        ({'keep_vars': [[0, 1]]}, 'must be a list or 1d array'),
+        ({'keep_vars': [0.5]}, 'must contain covariate names or indices'),
+        ({'keep_vars': np.array(['x0', 1], object)}, 'names or indices, got object'),
+    ],
+)
+def test_keep_drop_vars_validation(
+    continuous_data: _Data, keys: split, mfp: dict, match: str
+) -> None:
+    """Invalid `keep_vars` and `drop_vars` raise."""
+    with jaxtyping_disabled(), pytest.raises(ValueError, match=match):
+        _sample_blocked(continuous_data, keys.pop(), mean_forest_params=mfp)
+
+
+@pytest.mark.parametrize(
+    ('mfp', 'match'),
+    [
+        ({'drop_vars': [4]}, r'indices outside \[0, 4\)'),
+        ({'drop_vars': jnp.array([-1])}, r'indices outside \[0, 4\)'),
+        ({'keep_vars': []}, 'with at least one > 0'),
+    ],
+)
+def test_keep_drop_vars_runtime_validation(
+    continuous_data: _Data, keys: split, mfp: dict, match: str
+) -> None:
+    """Invalid values of `keep_vars` and `drop_vars` raise when checked by jax."""
+    with pytest.raises(EQX_RUNTIME_ERRORS, match=match):
+        _sample_blocked(continuous_data, keys.pop(), mean_forest_params=mfp)
 
 
 def test_standardization_matches(continuous_data: _Data, keys: split) -> None:
@@ -901,6 +1026,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         'beta': 2.0,
         'sigma2_leaf_init': 1.0 / 200,
         'variable_weights': jnp.ones(p),
+        'keep_vars': jnp.arange(1, p),
         'level': 0.9,
     }
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
@@ -922,6 +1048,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         beta: float,
         sigma2_leaf_init: float,
         variable_weights: Shaped[Array, '...'],
+        keep_vars: Shaped[Array, '...'],
         level: float,
     ) -> tuple[Array, ...]:
         m = bst.BARTModel()
@@ -941,6 +1068,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
                 'alpha': alpha,
                 'beta': beta,
                 'sigma2_leaf_init': sigma2_leaf_init,
+                'keep_vars': keep_vars,
             },
             bart_kwargs=bart_kwargs,
         )
@@ -1097,6 +1225,7 @@ class TestPreprocessing:
         | pa.Table,
         y: Shaped[Array, '...'] | Shaped[np.ndarray, '...'],
         key: Shaped[Array, '...'],
+        *,
         X_test: Shaped[Array, '...']
         | Shaped[np.ndarray, '...']
         | pd.DataFrame
@@ -1104,6 +1233,8 @@ class TestPreprocessing:
         | pa.Table
         | None = None,
         general_params: Mapping[str, Any] | None = None,
+        mean_forest_params: Mapping[str, Any] | None = None,
+        bart_kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> bst.BARTModel:
         m = bst.BARTModel()
         m.sample(
@@ -1111,9 +1242,84 @@ class TestPreprocessing:
             y_train=y,
             X_test=X_test,
             general_params=dict(general_params or {}, random_seed=key),
+            mean_forest_params=mean_forest_params,
+            bart_kwargs=bart_kwargs,
             **_SAMPLE_KW,
         )
         return m
+
+    def _make_mixed_df(
+        self, flavor: str, data: _Data, keys: split
+    ) -> pd.DataFrame | pl.DataFrame | pa.Table:
+        """Make a frame with numeric columns 'x0', 'x1' and a 2-level categorical 'c'."""
+        X_arr = np.asarray(data.X_train)
+        rng = np.random.default_rng(int_seed(keys.pop()))
+        cats = ['a', 'b']
+        return self._make_df(
+            flavor,
+            {
+                'x0': {'kind': 'numeric', 'values': X_arr[:, 0].tolist()},
+                'x1': {'kind': 'numeric', 'values': X_arr[:, 1].tolist()},
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': rng.choice(cats, size=X_arr.shape[0]).tolist(),
+                    'categories': cats,
+                },
+            },
+        )
+
+    @pytest.mark.parametrize('flavor', _FLAVORS)
+    @pytest.mark.parametrize(
+        ('gp', 'mfp', 'bkw', 'blocked'),
+        [
+            ({}, {'drop_vars': ['c']}, {}, (2, 3)),
+            ({}, {'keep_vars': np.array(['x1', 'c'])}, {}, (0,)),
+            ({}, {'drop_vars': pd.Index(['x0', 'x1'])}, {}, (0, 1)),
+            (
+                {'variable_weights': np.array([1.0, 0.0, 1.0])},
+                {'drop_vars': [0]},
+                {},
+                (0, 1),
+            ),
+            ({}, {'keep_vars': jnp.array([0])}, {'rm_const': False}, (1, 2, 3)),
+        ],
+    )
+    def test_blocked_covariates(
+        self,
+        continuous_data: _Data,
+        keys: split,
+        *,
+        flavor: str,
+        gp: dict,
+        mfp: dict,
+        bkw: dict,
+        blocked: tuple[int, ...],
+    ) -> None:
+        """`keep_vars`, `drop_vars` and zero weights block all the one-hot columns of a covariate."""
+        df = self._make_mixed_df(flavor, continuous_data, keys)
+        m = self._sample(
+            df,
+            continuous_data.y_train,
+            keys.pop(),
+            general_params=gp,
+            mean_forest_params=mfp,
+            bart_kwargs=bkw,
+        )
+        varcount = np.asarray(m._bart.varcount.sum(axis=0))
+        is_blocked = np.isin(np.arange(varcount.size), blocked)
+        assert_array_equal(varcount[is_blocked], np.zeros(len(blocked), varcount.dtype))
+        assert np.all(varcount[~is_blocked] > 0)
+
+    def test_keep_vars_unknown_name(self, continuous_data: _Data, keys: split) -> None:
+        """A name not among the dataframe columns raises."""
+        df = self._make_mixed_df('pandas', continuous_data, keys)
+        with pytest.raises(ValueError, match=r"names not in X_train: \['z'\]"):
+            self._sample(
+                df,
+                continuous_data.y_train,
+                keys.pop(),
+                mean_forest_params={'keep_vars': ['x0', 'z']},
+            )
 
     # --------------------------------------------------- preprocessor unit tests
 

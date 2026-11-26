@@ -31,20 +31,21 @@ from functools import partial
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar, overload
 
-from equinox import error_if
+import numpy as np
+from equinox import error_if, tree_at
 from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr, ndtri
-from jaxtyping import Array, Float, Float32, Key, Real, Shaped
+from jaxtyping import Array, Bool, Float, Float32, Integer, Key, Real, Shaped
 
 from bartz._interface import Bart, PredictKind, Series
 from bartz._jaxext import forbid_x64, is_key, jit, split
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcstep import Wishart
 from bartz.mcmcstep._state import ArrayLike, FloatLike
-from bartz.prepcovars import RangeEvenBinner
+from bartz.prepcovars import BinnerFactory, RangeEvenBinner
 from bartz.stochtree._preprocess import DataFrame, Preprocessor, to_narwhals
 
 if TYPE_CHECKING:
@@ -99,6 +100,9 @@ class GeneralParams:
     standardize: bool = True
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
 
+    sample_sigma2_global: bool = True
+    """Whether to sample the global error variance, or hold it fixed at `sigma2_init`. Ignored for probit binary regression, where the variance is fixed at 1."""
+
     sigma2_init: FloatLike | None = None
     """Starting value of the global error variance. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit."""
 
@@ -109,7 +113,7 @@ class GeneralParams:
     """Scale parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
 
     variable_weights: Float[ArrayLike, ' p'] | None = None
-    """Per-predictor sampling weights. Must be strictly positive; pass a small positive value to suppress a variable."""
+    """Relative probability of splitting on each covariate. The trees never split on covariates with weight 0."""
 
     random_seed: int | Key[Array, ''] | None = None
     """Seed for the random number generator. Unlike stochtree, the default
@@ -142,6 +146,26 @@ class MeanForestParams:
 
     min_samples_leaf: int = 5
     """Minimum number of training samples at a leaf."""
+
+    keep_vars: (
+        Sequence[str]
+        | Sequence[int]
+        | Shaped[np.ndarray, ' k_keep']
+        | Integer[Array, ' k_keep']
+        | Series
+        | None
+    ) = None
+    """Names (for dataframes) or indices of the only covariates the trees may split on."""
+
+    drop_vars: (
+        Sequence[str]
+        | Sequence[int]
+        | Shaped[np.ndarray, ' k_drop']
+        | Integer[Array, ' k_drop']
+        | Series
+        | None
+    ) = None
+    """Names (for dataframes) or indices of covariates the trees may not split on. Ignored if `keep_vars` is set."""
 
     max_depth: int = 10
     """Maximum tree depth. Must be a non-negative integer at most ``16``."""
@@ -196,6 +220,19 @@ def build_dataclass(cls: type[T], params: Mapping[str, Any] | None, name: str) -
         )
         raise ValueError(msg)
     return cls(**params)
+
+
+class TrainingInputs(NamedTuple):
+    """Training data of `BARTModel.sample`, validated and converted to arrays."""
+
+    X: Real[Array, 'n p']
+    """Covariates, with dataframes encoded as numerical columns."""
+
+    y: Real[Array, ' n']
+    """Outcomes."""
+
+    variable_weights: Float32[Array, ' p'] | None
+    """Splitting weights, zero for the covariates excluded by `keep_vars` or `drop_vars`."""
 
 
 class BARTModel:
@@ -255,7 +292,7 @@ class BARTModel:
     """Whether the outcome was standardized before fitting."""
 
     sample_sigma2_global: bool
-    """Whether the global error variance is sampled (``False`` for probit binary regression)."""
+    """Whether the global error variance is sampled (always ``False`` for probit binary regression)."""
 
     probit_outcome_model: bool
     """Whether the model uses a binary outcome with probit link."""
@@ -347,7 +384,8 @@ class BARTModel:
         X_train: Real[ArrayLike, 'n p'] | DataFrame,
         y_train: Real[ArrayLike, ' n'] | Series,
         gp: GeneralParams,
-    ) -> tuple[Real[Array, 'n p'], Real[Array, ' n'], Float32[Array, ' p'] | None]:
+        mfp: MeanForestParams,
+    ) -> TrainingInputs:
         """Coerce inputs and build variable weights, fitting the DataFrame preprocessor if any."""
         y_train_arr = _coerce_response(y_train, name='y_train')
 
@@ -357,6 +395,9 @@ class BARTModel:
             X_train_arr = check_X(X_train, name='X_train')
             _, p = X_train_arr.shape
             varprob = check_variable_weights(gp.variable_weights, p)
+            columns = None
+            num_covariates = p
+            original_var_indices = range(p)
         else:
             # The preprocessor decides the default weights: uniform over the
             # *original* columns split across each one-hot expansion (so every
@@ -372,6 +413,15 @@ class BARTModel:
                 raise ValueError(msg)
             X_train_arr = jnp.asarray(X_train_np)
             varprob = None if weights_np is None else jnp.asarray(weights_np)
+            columns = tuple(str(c) for c in df_train.columns)
+            num_covariates = len(columns)
+            original_var_indices = self._preprocessor.original_var_indices
+
+        mask = covariate_mask(mfp.keep_vars, mfp.drop_vars, columns, num_covariates)
+        if mask is not None:
+            mask = mask[np.asarray(original_var_indices)]
+            # like stochtree, exclude covariates by zeroing their weights
+            varprob = jnp.where(mask, 1.0 if varprob is None else varprob, 0.0)
 
         n, _ = X_train_arr.shape
         if y_train_arr.shape[0] != n:
@@ -380,7 +430,8 @@ class BARTModel:
                 f' y_train has {y_train_arr.shape[0]} entries'
             )
             raise ValueError(msg)
-        return X_train_arr, y_train_arr, varprob
+
+        return TrainingInputs(X_train_arr, y_train_arr, varprob)
 
     @forbid_x64
     def sample(
@@ -460,13 +511,10 @@ class BARTModel:
 
         is_probit = gp.outcome_model.outcome == 'binary'
 
-        X_train_arr, y_train_arr, variable_weights = self._prepare_training_inputs(
-            X_train, y_train, gp
-        )
+        inputs = self._prepare_training_inputs(X_train, y_train, gp, mfp)
+        sample_sigma2_global = gp.sample_sigma2_global and not is_probit
 
-        y_bar, y_std, y_for_bartz = standardize_y(
-            y_train_arr, is_probit, gp.standardize
-        )
+        y_bar, y_std, y_for_bartz = standardize_y(inputs.y, is_probit, gp.standardize)
 
         bart_num_chains = None if gp.num_chains == 1 else gp.num_chains
 
@@ -521,7 +569,19 @@ class BARTModel:
                 )
             )
 
-        binner = partial(RangeEvenBinner, max_bins=256)
+        error_init_kw: dict = (
+            {}
+            if sample_sigma2_global or is_probit
+            else {
+                'error_cov_inv': Wishart(
+                    nu=None, rate=None, value=jnp.reciprocal(sigma2_init_stored)
+                )
+            }
+        )
+
+        weights_args = resolve_variable_weights(
+            inputs.variable_weights, rm_const=bart_kwargs.get('rm_const', True)
+        )
 
         seed = 0 if gp.random_seed is None else gp.random_seed
         if not is_key(seed):
@@ -529,11 +589,11 @@ class BARTModel:
         keys = split(seed)
 
         kwargs: dict = dict(
-            x_train=X_train_arr.T,
+            x_train=inputs.X.T,
             y_train=y_for_bartz,
             outcome_type='binary' if is_probit else 'continuous',
-            binner=binner,
-            varprob=variable_weights,
+            binner=weights_args.binner,
+            varprob=weights_args.varprob,
             sigma_df=sigma_df_arg,
             sigma_scale=sigma_scale_arg,
             sigma_init=sigma_init_arg,
@@ -566,6 +626,8 @@ class BARTModel:
                     'min_points_per_leaf': mfp.min_samples_leaf,
                     'min_points_per_decision_node': 2 * mfp.min_samples_leaf,
                     **leaf_init_kw,
+                    **error_init_kw,
+                    **weights_args.init_kw,
                 },
                 **kwargs.get('init_kw', {}),
             ),
@@ -573,7 +635,7 @@ class BARTModel:
         self._bart = Bart(**kwargs)
         self._ppd_key = keys.pop()
         self._ppd_count = 0
-        n_train, num_covariates = X_train_arr.shape
+        n_train, num_covariates = inputs.X.shape
         self._finalize_sample(
             outcome_model=gp.outcome_model,
             num_burnin=num_burnin,
@@ -582,6 +644,7 @@ class BARTModel:
             keep_every=gp.keep_every,
             n_train=n_train,
             num_covariates=num_covariates,
+            sample_sigma2_global=sample_sigma2_global,
             sample_sigma2_leaf=mfp.sample_sigma2_leaf,
             sigma2_init=sigma2_init_stored,
             y_bar=y_bar,
@@ -600,6 +663,7 @@ class BARTModel:
         keep_every: int,
         n_train: int,
         num_covariates: int,
+        sample_sigma2_global: bool,
         sample_sigma2_leaf: bool,
         sigma2_init: FloatLike,
         y_bar: Float32[Array, ''],
@@ -611,7 +675,7 @@ class BARTModel:
         is_probit = outcome_model.outcome == 'binary'
         self.sampled = True
         self.standardize = standardize
-        self.sample_sigma2_global = not is_probit
+        self.sample_sigma2_global = sample_sigma2_global
         self.sample_sigma2_leaf = sample_sigma2_leaf
         self.probit_outcome_model = is_probit
         self.outcome_model = outcome_model
@@ -640,11 +704,11 @@ class BARTModel:
             self.y_hat_test = None
             self.n_test = 0
 
-        if is_probit:
-            self.global_var_samples = None
-        else:
+        if sample_sigma2_global:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2
+        else:
+            self.global_var_samples = None
 
         if sample_sigma2_leaf:
             self.leaf_scale_samples = get_leaf_scale_samples(
@@ -919,9 +983,18 @@ class BARTModel:
                 1 if self.num_samples >= 1000 else math.ceil(1000 / self.num_samples)
             )
         eta = self._predict_y_hat_internal(self._prepare_x(X).T)
+
+        if self.probit_outcome_model:
+            sigma2 = None
+        elif self.global_var_samples is None:
+            sigma2_fixed = self.sigma2_init * jnp.square(self.y_std)
+            sigma2 = jnp.broadcast_to(sigma2_fixed, (self.num_samples,))
+        else:
+            sigma2 = self.global_var_samples
+
         key = random.fold_in(self._ppd_key, self._ppd_count)
         self._ppd_count += 1
-        return sample_outcome(key, eta, self.global_var_samples, num_draws_per_sample)
+        return sample_outcome(key, eta, sigma2, num_draws_per_sample)
 
     def has_term(self, term: Literal['mean_forest', 'y_hat', 'all']) -> bool:
         """Return whether the model includes a term.
@@ -1216,6 +1289,125 @@ def check_variable_weights(
         msg = f'variable_weights must have shape (p,)=({p},), got {arr.shape}'
         raise ValueError(msg)
     return arr
+
+
+class VariableWeightsArgs(NamedTuple):
+    """Arguments of `Bart` that implement the variable weights."""
+
+    binner: BinnerFactory
+    """Binner that allows no splits on the covariates with zero weight."""
+
+    varprob: Float32[Array, ' p'] | None
+    """Positive variable weights, or `None` for uniform weights."""
+
+    init_kw: dict[str, int]
+    """Entries of `init_kw` needed to block the covariates with zero weight."""
+
+
+def resolve_variable_weights(
+    variable_weights: Float32[Array, ' p'] | None, *, rm_const: bool
+) -> VariableWeightsArgs:
+    """Block the covariates with zero weight from splitting."""
+    if variable_weights is None:
+        binner: BinnerFactory = partial(RangeEvenBinner, max_bins=256)
+        varprob = None
+    else:
+        blocked = variable_weights == 0
+        binner = partial(blocked_binner, blocked=blocked)
+        # bartz rejects zero weights, and never picks blocked covariates
+        varprob = jnp.where(blocked, 1.0, variable_weights)
+        valid = jnp.all(variable_weights >= 0) & jnp.any(variable_weights > 0)
+        varprob = error_if(
+            varprob, ~valid, 'variable_weights must be >= 0, with at least one > 0'
+        )
+
+    # with rm_const=True, Bart counts the blocked covariates by itself;
+    # otherwise the zero weights may be traced, so allow up to all but one to
+    # be blocked, which costs nothing extra because `varprob` is set
+    if rm_const or variable_weights is None:
+        init_kw = {}
+    else:
+        (p,) = variable_weights.shape
+        init_kw = {'filter_splitless_vars': p - 1}
+    return VariableWeightsArgs(binner, varprob, init_kw)
+
+
+def covariate_mask(
+    keep_vars: Sequence[str]
+    | Sequence[int]
+    | Shaped[np.ndarray, ' k_keep']
+    | Integer[Array, ' k_keep']
+    | Series
+    | None,
+    drop_vars: Sequence[str]
+    | Sequence[int]
+    | Shaped[np.ndarray, ' k_drop']
+    | Integer[Array, ' k_drop']
+    | Series
+    | None,
+    columns: Sequence[str] | None,
+    p: int,
+) -> Bool[Array, ' p'] | None:
+    """Mark the covariates the trees may split on, or return `None` if all."""
+    if keep_vars is not None:
+        keep = covariate_indices(keep_vars, columns, p, 'keep_vars')
+        return jnp.zeros(p, bool).at[keep].set(True)
+    elif drop_vars is not None:
+        drop = covariate_indices(drop_vars, columns, p, 'drop_vars')
+        return jnp.ones(p, bool).at[drop].set(False)
+    else:
+        return None
+
+
+def covariate_indices(
+    covariates: Sequence[str]
+    | Sequence[int]
+    | Shaped[np.ndarray, ' k']
+    | Integer[Array, ' k']
+    | Series,
+    columns: Sequence[str] | None,
+    p: int,
+    name: str,
+) -> Integer[Array, ' k']:
+    """Convert covariate names or indices to indices, with friendly errors."""
+    arr = covariates if isinstance(covariates, Array) else np.asarray(covariates)
+    if arr.ndim != 1:
+        msg = f'{name} must be a list or 1d array of covariate names or indices'
+        raise ValueError(msg)
+
+    if arr.size == 0:
+        indices = jnp.zeros(0, int)
+    elif arr.dtype.kind == 'U' or (
+        arr.dtype.kind == 'O' and all(isinstance(c, str) for c in arr.tolist())
+    ):
+        if columns is None:
+            msg = f'{name} may contain covariate names only if X_train is a dataframe'
+            raise ValueError(msg)
+        unknown = sorted(set(arr.tolist()) - set(columns))
+        if unknown:
+            msg = f'{name} contains names not in X_train: {unknown}'
+            raise ValueError(msg)
+        indices = jnp.array([columns.index(c) for c in arr.tolist()])
+    elif arr.dtype.kind in 'iu':
+        indices = jnp.asarray(arr)
+    else:
+        msg = f'{name} must contain covariate names or indices, got {arr.dtype}'
+        raise ValueError(msg)
+
+    out_of_range = jnp.any((indices < 0) | (indices >= p))
+    return error_if(indices, out_of_range, f'{name} contains indices outside [0, {p})')
+
+
+def blocked_binner(
+    X: Real[Array, 'p n'],
+    *,
+    key: Key[Array, ''] | None = None,  # noqa: ARG001
+    blocked: Bool[Array, ' p'],
+) -> RangeEvenBinner:
+    """Bin like stochtree, allowing no splits on the `blocked` covariates."""
+    binner = RangeEvenBinner(X, key=None, max_bins=256)
+    max_split = jnp.where(blocked, 0, binner.max_split)
+    return tree_at(lambda b: b.max_split, binner, max_split)
 
 
 def check_predict_args(

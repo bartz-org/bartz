@@ -2385,7 +2385,7 @@ def test_affluence_tree_stays_clean(
         max_split=data.max_split,
         num_trees=NUM_TREES,
         p_nonterminal=make_p_nonterminal(5),
-        sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / NUM_TREES),
+        sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
         min_points_per_leaf=min_points_per_leaf,
@@ -3168,6 +3168,16 @@ def test_one_bin_prec_reduction_auto(
     assert state.config.one_bin_prec_reduction == expected
 
 
+@pytest.mark.parametrize('case', ['plain', 'multivariate'])
+def test_fixed_error_precision_warns(keys: split, case: str) -> None:
+    """`init` warns if the error precision of a continuous outcome has no prior."""
+    kw: dict = case_init_kw(keys.pop(), case)
+    value = kw['error_cov_inv'].value
+    kw = dict(kw, error_cov_inv=Wishart(nu=None, rate=None, value=value))
+    with pytest.warns(UserWarning, match='`error_cov_inv` has no prior'):
+        init(**kw)
+
+
 def test_one_bin_prec_reduction_auto_jit(keys: split) -> None:
     """Under jit, the 'auto' one-bin precision reduction needs concrete error scales."""
     n = 100
@@ -3921,7 +3931,7 @@ def test_z_valid_with_confident_misclassification(
         max_split=max_split,
         num_trees=NUM_TREES,
         p_nonterminal=jnp.array([0.9, 0.5]),
-        sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / NUM_TREES),
+        sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
     )
 
     # `step_z` and not `step` because `step` is jitted, and whether xla flushes
@@ -4728,7 +4738,7 @@ class TestMultivariate:
             max_split=max_split,
             num_trees=NUM_TREES,
             p_nonterminal=jnp.array([0.9, 0.5]),
-            sum_trees_prior_cov_inv=Wishart(None, None, jnp.eye(k) / NUM_TREES),
+            sum_trees_prior_cov_inv=Wishart(None, None, jnp.eye(k)),
             resid_reduction_config=BatchedReduction(num_batches=None),
             count_reduction_config=BatchedReduction(num_batches=None),
         )
@@ -5136,7 +5146,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 2, jnp.uint8),
             num_trees=16,
             p_nonterminal=make_p_nonterminal(5, alpha=0.99, beta=0.5),
-            sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / 16),
+            sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
@@ -5190,7 +5200,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 4, jnp.uint8),
             num_trees=NUM_TREES,
             p_nonterminal=make_p_nonterminal(3),
-            sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / NUM_TREES),
+            sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,

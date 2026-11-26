@@ -26,7 +26,7 @@
 
 import math
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from functools import partial
@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias
 
 from equinox import Module, error_if, field
 from jax import (
+    Device,
     ShapeDtypeStruct,
     block_until_ready,
     clear_caches,
@@ -122,10 +123,6 @@ def patch_make_mesh() -> None:
 
 patch_make_mesh()
 
-# WORKAROUND(bartz<0.11.0): mc_gbart switched its array predictor layout from
-# (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
-X_N_BY_P = "'n p'" in str(signature(gbart).parameters['x_train'].annotation)
-
 if TYPE_CHECKING:
     from bartz import Bart
 else:
@@ -135,32 +132,81 @@ else:
         Bart = None
     if Bart is None or 'n_save' not in signature(Bart).parameters:
         # WORKAROUND(bartz<0.10.0): `Bart` was added in 0.8.0 and took
-        # ndpost/nskip until 0.10.0; emulate the subset used here with gbart
-        def Bart(
-            x_train: Shaped[Array, 'p n'],
-            y_train: Shaped[Array, ' n'],
-            *,
-            num_trees: int,
-            n_save: int,
-            n_burn: int,
-            num_chains: int | None,
-            seed: Key[Array, ''],
-        ) -> gbart:
-            """Run `gbart` with `Bart` arguments."""
-            kw: dict = dict(
-                ntree=num_trees,
-                ndpost=n_save,
-                nskip=n_burn,
-                usequants=True,
-                numcut=255,
-                seed=seed,
-            )
-            if 'mc_cores' in signature(gbart).parameters:
-                kw = dict(kw, mc_cores=num_chains or 1)
-            elif num_chains is not None:
-                msg = 'multichain not supported'
-                raise NotImplementedError(msg)
-            return gbart(x_train.T if X_N_BY_P else x_train, y_train, **kw)
+        # ndpost/nskip until 0.10.0; emulate the subset used here with gbart,
+        # which in 0.8.0-0.9.x just forwards to `Bart`.
+        class Bart:
+            """Emulate `Bart` with `gbart`."""
+
+            def __init__(
+                self,
+                x_train: Shaped[Array, 'p n'],
+                y_train: Shaped[Array, ' n'],
+                *,
+                rm_const: bool = True,
+                num_trees: int = 200,
+                n_save: int = 1000,
+                n_burn: int = 1000,
+                printevery: int | None = 100,
+                num_chains: int | None = 4,
+                num_chain_devices: int | None | Literal['auto'] = 'auto',
+                devices: Sequence[Device] | None = None,
+                seed: int | Key[Array, ''] = 0,
+            ) -> None:
+                bartz_version = Version(metadata.version('bartz'))
+                if printevery is None and bartz_version < Version('0.6.0'):
+                    # WORKAROUND(bartz<0.6.0): gbart can't disable logging
+                    printevery = n_burn + n_save + 1
+                params = signature(gbart).parameters
+                kw: dict = dict(
+                    ntree=num_trees,
+                    ndpost=n_save * (num_chains or 1),
+                    nskip=n_burn,
+                    # the default binning of `Bart`
+                    usequants=True,
+                    numcut=255,
+                    printevery=printevery,
+                    seed=seed,
+                )
+                if 'rm_const' in params:
+                    # WORKAROUND(bartz<0.8.0): in 0.7.0, the check of
+                    # rm_const=False can't be traced, None skips it
+                    kw = dict(kw, rm_const=rm_const or None)
+                if 'mc_cores' in params:
+                    bart_kwargs = {}
+                    if num_chain_devices != 'auto':
+                        bart_kwargs = dict(num_chain_devices=num_chain_devices)
+                    if devices is not None:
+                        bart_kwargs = dict(bart_kwargs, devices=devices)
+                    kw = dict(kw, mc_cores=num_chains or 1, bart_kwargs=bart_kwargs)
+                elif num_chains is not None:
+                    # WORKAROUND(bartz<0.8.0): single chain on the default device
+                    msg = 'multichain not supported'
+                    raise NotImplementedError(msg)
+                self.gbart = gbart(x_train, y_train, **kw)
+
+            def predict(
+                self,
+                x_test: Shaped[Array, 'p m'],
+                *,
+                kind: Literal['mean', 'mean_samples'] = 'mean',
+            ) -> Shaped[Array, ' m'] | Shaped[Array, 'ndpost m']:
+                """Predict the latent mean at `x_test`."""
+                samples = self.gbart.predict(x_test)
+                match kind:
+                    case 'mean':
+                        return samples.mean(axis=0)
+                    case 'mean_samples':
+                        return samples
+                    case _:
+                        raise KeyError(kind)
+
+            def block_until_ready(self) -> None:
+                """Wait for the MCMC to finish."""
+                if isinstance(self.gbart, Module):
+                    block_until_ready(self.gbart)
+                else:
+                    # WORKAROUND(bartz<0.7.0): gbart was not an equinox Module
+                    block_until_ready((self.gbart._mcmc_state, self.gbart._main_trace))
 
 
 from bartz.mcmcstep import init, step
@@ -737,8 +783,8 @@ class StepMemorySharded(StepMemory):
         self.peak_ratio *= num_devices
 
 
-class BaseGbart(AutoParamNames):
-    """Base class to benchmark `mc_gbart`."""
+class BaseBart(AutoParamNames):
+    """Base class to benchmark `Bart`."""
 
     # asv config
     # the param list is empty in this class, this makes asv skip this class
@@ -756,12 +802,9 @@ class BaseGbart(AutoParamNames):
         kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         """Prepare the arguments and run once to warm-up."""
-        # check support for multiple chains
-        sig = signature(gbart)
-        support_multichain = 'mc_cores' in sig.parameters
-        if nchains != 1 and not support_multichain:
-            # WORKAROUND(bartz<0.8.0): mc_gbart (with mc_cores) was added in 0.8.0
-            msg = 'multi-chain not supported'
+        if nchains != 1 and 'num_chains' not in signature(init).parameters:
+            # WORKAROUND(bartz<0.8.0): no built-in multichain support
+            msg = 'multichain not supported'
             raise NotImplementedError(msg)
 
         # random seed
@@ -784,56 +827,46 @@ class BaseGbart(AutoParamNames):
 
         # arguments
         self.kw: dict = dict(
-            x_train=train.x.T if X_N_BY_P else train.x,
+            x_train=train.x,
             y_train=train.y.squeeze(0),
-            ntree=NTREE,
-            nskip=niters // 2,
-            ndpost=(niters - niters // 2) * nchains,
+            num_trees=NTREE,
+            n_burn=niters // 2,
+            n_save=niters - niters // 2,
+            num_chains=None if nchains == 1 else nchains,
             seed=keys.pop(),
+            **kwargs,
         )
-        if support_multichain:
-            self.kw.update(mc_cores=nchains)
-        self.kw.update(kwargs)
         block_until_ready(self.kw)
 
         # save information used to run predictions
         self.predict = predict
         if predict:
             self.test = test
-            self.bart = gbart(**self.kw)
-            block_bart(self.bart)
+            self.bart = Bart(**self.kw)
+            block_until_ready(self.bart)
 
         # decide how much to cold-start
         match cache:
             case 'cold':
                 clear_caches()
             case 'warm':
-                self.time_gbart()
+                self.time_bart()
             case _:
                 raise KeyError(cache)
 
-    def time_gbart(self, *_: Any) -> None:
+    def time_bart(self, *_: Any) -> None:
         """Time instantiating the class."""
         with redirect_stdout(StringIO()):
             if self.predict:
-                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)
+                ypred = self.bart.predict(self.test.x, kind='mean_samples')
                 block_until_ready(ypred)
             else:
-                bart = gbart(**self.kw)
-                block_bart(bart)
+                bart = Bart(**self.kw)
+                block_until_ready(bart)
 
 
-def block_bart(bart: gbart | Bart) -> None:
-    """Block a bart object until ready, adapting for old versions."""
-    if isinstance(bart, Module):
-        block_until_ready(bart)
-    else:
-        # WORKAROUND(bartz<0.7.0): pre-0.7.0 gbart was not an equinox Module
-        block_until_ready((bart._mcmc_state, bart._main_trace))
-
-
-class GbartIters(BaseGbart):
-    """Time `mc_gbart` vs. the number of iterations.
+class BartIters(BaseBart):
+    """Time `Bart` vs. the number of iterations.
 
     This is useful to distinguish the startup time from the time per iteration.
     """
@@ -841,15 +874,16 @@ class GbartIters(BaseGbart):
     params = ((0, NITERS, 5 * NITERS),)
 
 
-class GbartChains(BaseGbart):
-    """Time `mc_gbart` vs. the number of chains."""
+class BartChains(BaseBart):
+    """Time `Bart` vs. the number of chains."""
 
     params = ((1, 4, 16, 32), (False, True))
 
     def setup(self, nchains: int, shard: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up to use or not multiple cpus."""
         # check there is support for multichain
-        if 'mc_cores' not in signature(gbart).parameters:
+        if 'num_chains' not in signature(init).parameters:
+            # WORKAROUND(bartz<0.8.0): no built-in multichain support
             msg = 'multichain not supported'
             raise NotImplementedError(msg)
 
@@ -869,11 +903,11 @@ class GbartChains(BaseGbart):
             # on gpu shard explicitly
             kwargs = dict(num_chain_devices=min(nchains, get_device_count()))
 
-        super().setup(NITERS, nchains, 'warm', False, dict(bart_kwargs=kwargs))
+        super().setup(NITERS, nchains, 'warm', False, kwargs)
 
 
-class GbartGeneric(BaseGbart):
-    """General timing of `mc_gbart` with many settings."""
+class BartGeneric(BaseBart):
+    """General timing of `Bart` with many settings."""
 
     params = ((1, 6), ('warm', 'cold'), (False, True))
 
@@ -922,7 +956,7 @@ class BartInit(AutoParamNames):
         """Time instantiating `Bart`."""
         with redirect_stdout(StringIO()):
             bart = Bart(**self.kw)
-        block_bart(bart)
+        block_until_ready(bart)
 
 
 class BaseRunMcmc(AutoParamNames):

@@ -242,13 +242,9 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
         num_trees_tau=NUM_TREES_TAU,
         p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
         p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
-        # unit leaf precisions, with a prior on the first
-        sum_trees_prior_cov_inv_mu=Wishart(
-            nu=6.0, rate=2.0 * NUM_TREES_MU, value=1.0 / NUM_TREES_MU
-        ),
-        sum_trees_prior_cov_inv_tau=Wishart(
-            nu=None, rate=None, value=1.0 / NUM_TREES_TAU
-        ),
+        # unit precisions of the sums of trees, with a prior on the first
+        sum_trees_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+        sum_trees_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
         min_points_per_leaf_mu=10,
         min_points_per_leaf_tau=10,
         error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
@@ -942,9 +938,7 @@ class TestBcf:
             return init_bcf_state(
                 random.clone(binner_key),
                 train,
-                sum_trees_prior_cov_inv_tau=Wishart(
-                    nu=6.0, rate=2.0 * NUM_TREES_TAU, value=1.0 / NUM_TREES_TAU
-                ),
+                sum_trees_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
                 adaptive_coding=True,
                 num_chains=num_chains,
             )
